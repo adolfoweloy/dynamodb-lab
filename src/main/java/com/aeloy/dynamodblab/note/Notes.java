@@ -1,14 +1,11 @@
 package com.aeloy.dynamodblab.note;
 
 import com.aeloy.dynamodblab.http.ErrorMessage;
-import com.aeloy.dynamodblab.note.converter.DynamoDBItemToNoteConverter;
-import com.aeloy.dynamodblab.note.converter.NoteToDynamoDBItemConverter;
 import com.aeloy.dynamodblab.note.definitions.NoteFields;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
-import com.amazonaws.services.dynamodbv2.document.DynamoDB;
-import com.amazonaws.services.dynamodbv2.document.Item;
-import com.amazonaws.services.dynamodbv2.document.ItemCollection;
-import com.amazonaws.services.dynamodbv2.document.QueryOutcome;
+import com.amazonaws.services.dynamodbv2.document.*;
+import com.amazonaws.services.dynamodbv2.document.spec.DeleteItemSpec;
+import com.amazonaws.services.dynamodbv2.document.spec.PutItemSpec;
 import com.amazonaws.services.dynamodbv2.document.spec.QuerySpec;
 import com.amazonaws.services.dynamodbv2.document.utils.NameMap;
 import com.amazonaws.services.dynamodbv2.document.utils.ValueMap;
@@ -32,16 +29,11 @@ public class Notes {
     private static final String TABLE = "tb_notes";
     private final AmazonDynamoDB amazonDynamoDB;
     private final DynamoDB dynamoDB;
-    private final DynamoDBItemToNoteConverter dynamoDBItemToNoteConverter;
-    private final NoteToDynamoDBItemConverter noteToDynamoDBItemConverter;
 
     public Notes(AmazonDynamoDB amazonDynamoDB,
-                 DynamoDB dynamoDB, DynamoDBItemToNoteConverter dynamoDBItemToNoteConverter,
-                 NoteToDynamoDBItemConverter noteToDynamoDBItemConverter) {
+                 DynamoDB dynamoDB) {
         this.amazonDynamoDB = amazonDynamoDB;
         this.dynamoDB = dynamoDB;
-        this.dynamoDBItemToNoteConverter = dynamoDBItemToNoteConverter;
-        this.noteToDynamoDBItemConverter = noteToDynamoDBItemConverter;
     }
 
     /**
@@ -52,20 +44,29 @@ public class Notes {
      * @return Returns the Note added or an Error
      */
     Either<ErrorMessage, Note> add(Note note) {
-        PutItemRequest request = new PutItemRequest()
-                .withTableName(TABLE)
+        Item item = new Item()
+                .withPrimaryKey(new PrimaryKey()
+                        .addComponent(NoteFields.USER_ID, note.getUserId())
+                        .addComponent(NoteFields.TIMESTAMP, Long.toString(note.getTimestamp())))
+                .withString(NoteFields.CONTENT, note.getContent())
+                .withString(NoteFields.NOTE_ID, note.getNoteId())
+                .withString(NoteFields.CATEGORY, note.getCategory())
+                .withString(NoteFields.TITLE, note.getTitle())
+                .withString(NoteFields.USER_NAME, note.getUserName());
+
+        PutItemSpec putSpec = new PutItemSpec()
+                .withItem(item)
+                .withReturnValues(ReturnValue.ALL_OLD)
                 .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
-                .withItem(noteToDynamoDBItemConverter.convert(note))
-                .withConditionExpression("#timestamp <> :timestamp")
-                .addExpressionAttributeNamesEntry("#timestamp", "timestamp")
-                .addExpressionAttributeValuesEntry(":timestamp",
-                        new AttributeValue().withS(Long.toString(note.getTimestamp())));
+                .withConditionExpression("#t <> :t")
+                    .withNameMap(new NameMap().with("#t", NoteFields.TIMESTAMP))
+                    .withValueMap(new ValueMap().with(":t", Long.toString(note.getTimestamp())));
 
         try {
-            PutItemResult result = amazonDynamoDB.putItem(request);
+            PutItemOutcome result = dynamoDB.getTable(TABLE).putItem(putSpec);
 
-            LOGGER.info(String.format("consumed WCUs: %f", result.getConsumedCapacity().getWriteCapacityUnits()));
-            LOGGER.info(String.format("consumed RCUs: %f", result.getConsumedCapacity().getReadCapacityUnits()));
+            LOGGER.info(String.format("consumed RCUs: %f", result.getPutItemResult()
+                    .getConsumedCapacity().getCapacityUnits()));
 
             return right(note);
         } catch (ConditionalCheckFailedException e) {
@@ -120,7 +121,6 @@ public class Notes {
         try {
             var notes = new ArrayList<Note>();
 
-            DynamoDB client = new DynamoDB(amazonDynamoDB);
             QuerySpec spec = new QuerySpec()
                     .withConsistentRead(true) // just to see the consumed RCUs = 1.0
                     .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
@@ -128,7 +128,7 @@ public class Notes {
                         .withNameMap(new NameMap().with("#user_id", NoteFields.USER_ID))
                         .withValueMap(new ValueMap().withString(":user_id", userId));
 
-            ItemCollection<QueryOutcome> result = client.getTable(TABLE).query(spec);
+            ItemCollection<QueryOutcome> result = dynamoDB.getTable(TABLE).query(spec);
             result.forEach(item -> notes.add(convertItemToNote(item)));
 
             LOGGER.info(String.format("consumed RCUs: %f",
@@ -137,6 +137,40 @@ public class Notes {
             return right(notes);
         } catch (AmazonDynamoDBException e) {
             return left(new ErrorMessage(e.getMessage()));
+        }
+    }
+
+    /**
+     * Delete operations using document interfaces.
+     * @param userId        partition key
+     * @param timestamp     sort key
+     * @return returns the note deleted or error message otherwise.
+     */
+    Either<ErrorMessage, Note> deleteByKey(String userId, Long timestamp) {
+        DeleteItemSpec spec = new DeleteItemSpec()
+                .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
+                .withReturnValues(ReturnValue.ALL_OLD)
+                .withPrimaryKey(new PrimaryKey()
+                    .addComponent(NoteFields.USER_ID, userId)
+                    .addComponent(NoteFields.TIMESTAMP, timestamp.toString()));
+
+        try {
+            DeleteItemOutcome outcome = dynamoDB.getTable(TABLE).deleteItem(spec);
+            DeleteItemResult result = outcome.getDeleteItemResult();
+
+            LOGGER.info(String.format("consumed capacity: %f", result.getConsumedCapacity().getCapacityUnits()));
+
+            int httpStatusCode = result.getSdkHttpMetadata().getHttpStatusCode();
+            if (httpStatusCode / 100 == 2 && result.getAttributes() != null) {
+                return right(convertItemToNote(outcome.getItem()));
+            } else {
+                LOGGER.error(String.format("Http error: %d", httpStatusCode));
+                return left(new ErrorMessage("the item specified item cannot be deleted"));
+            }
+
+        } catch (AmazonDynamoDBException e) {
+            LOGGER.error(e.getMessage(), e);
+            return left(new ErrorMessage(String.format("items for %s cannot be deleted", userId)));
         }
     }
 
@@ -152,31 +186,4 @@ public class Notes {
         return note;
     }
 
-    Either<ErrorMessage, Note> deleteByKey(String userId, Long timestamp) {
-        DeleteItemRequest request = new DeleteItemRequest()
-                .withTableName(TABLE)
-                .addKeyEntry(NoteFields.USER_ID, new AttributeValue().withS(userId))
-                .addKeyEntry(NoteFields.TIMESTAMP, new AttributeValue().withS(Long.toString(timestamp)))
-                .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
-                .withReturnValues(ReturnValue.ALL_OLD);
-
-        try {
-            DeleteItemResult result = amazonDynamoDB.deleteItem(request);
-
-            LOGGER.info(String.format("consumed WCUs: %f", result.getConsumedCapacity().getWriteCapacityUnits()));
-            LOGGER.info(String.format("consumed RCUs: %f", result.getConsumedCapacity().getReadCapacityUnits()));
-
-            int httpStatusCode = result.getSdkHttpMetadata().getHttpStatusCode();
-            if (httpStatusCode / 100 == 2 && result.getAttributes() != null) {
-                return right(dynamoDBItemToNoteConverter.convert(result.getAttributes()));
-            } else {
-                LOGGER.error(String.format("Http error: %d", httpStatusCode));
-                return left(new ErrorMessage("the item specified item cannot be deleted"));
-            }
-
-        } catch (AmazonDynamoDBException e) {
-            LOGGER.error(e.getMessage(), e);
-            return left(new ErrorMessage(String.format("items for %s cannot be deleted", userId)));
-        }
-    }
 }

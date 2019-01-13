@@ -91,7 +91,7 @@ public class MusicController {
     }
 
     public List<Music> createListOfMusics() {
-        var list = new ArrayList<Music>();
+        var list = new ArrayList<>();
 
         for (int i = 0; i < 1; i++) {
             list.add(new Music("Hoodoo Gurus", "1000 Miles Away" + i));
