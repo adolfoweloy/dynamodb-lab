@@ -119,7 +119,7 @@ public class Notes {
      */
     Either<ErrorMessage, List<Note>> getNotesWithKey(String userId) {
         try {
-            var notes = new ArrayList<Note>();
+            var notes = new ArrayList<>();
 
             QuerySpec spec = new QuerySpec()
                     .withConsistentRead(true) // just to see the consumed RCUs = 1.0
