@@ -1,6 +1,8 @@
 /target/
 !.mvn/wrapper/maven-wrapper.jar
 
+.python-version
+
 ### STS ###
 .apt_generated
 .classpath
